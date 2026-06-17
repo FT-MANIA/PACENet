@@ -4,17 +4,29 @@ import numpy as np
 from scipy.signal import find_peaks
 from scipy.interpolate import interp1d
 
+def infer_side(left_label, right_label, target_label):
+    left_is_target = str(left_label) == target_label
+    right_is_target = str(right_label) == target_label
+
+    if left_is_target and right_is_target:
+        return "B"
+    elif left_is_target:
+        return "L"
+    elif right_is_target:
+        return "R"
+    else:
+        return "NA"
+
 def label_creater(left_label, right_label):
     """create label according to the disease type"""
     status_map = {
         'Healthy': 0,
-        'ACLD': 1,       # ACL
-        'KOA': 2, # ACL (包含合并)
+        'ACLD': 1,
+        'KOA': 2,
     }
     l_code = status_map.get(left_label, 0)
     r_code = status_map.get(right_label, 0)
 
-    # 0:健康, 1:ACL, 2:OA
     if l_code == 1 or r_code == 1: return 1
     elif l_code == 2 or r_code == 2: return 2
     else: return 0
@@ -53,10 +65,28 @@ def df_data_extractor(df):
         bmi = float(left_row.get('bmi', 0))
         demographics.append([gender, age, bmi])
 
+        acld_side = infer_side(left_row['label'], right_row['label'], target_label='ACLD')
+        koa_side = infer_side(left_row['label'], right_row['label'], target_label='KOA')
+
+        if lbl == 1:
+            affected_side = acld_side
+            affected_disease = "ACLD"
+        elif lbl == 2:
+            affected_side = koa_side
+            affected_disease = "KOA"
+        else:
+            affected_side = "NA"
+            affected_disease = "Healthy"
+
         if has_trace_info:
             src = str(left_row.get('source_file', 'unknown'))
             oid = str(left_row.get('original_id', 'unknown'))
-            trace_info.append({'source_file': src, 'original_id': oid})
+            trace_info.append({'source_file': src,
+                               'original_id': oid,
+                               'acld_side' : acld_side,
+                               'koa_side' : koa_side,
+                               'affected_side' : affected_side,
+                               'affected_disease' : affected_disease})
         else:
             trace_info.append(None)
 
@@ -114,7 +144,6 @@ class adaptive_gait_cycle_segmentation:
         swing_peaks, _ = find_peaks(flexion, distance=int(period * 0.6),
                                     prominence=max(3, dynamic_range * 0.4))
 
-        # find heel strike
         cut_points = []
         search_end_offset = int(period * 0.32)
 
@@ -130,7 +159,6 @@ class adaptive_gait_cycle_segmentation:
                     e_idx = min(swing_peaks[p + 1], swing_peaks[p] + search_end_offset)
             s_idx = swing_peaks[p] + int(period * 0.08)
             if s_idx < e_idx:
-                # find min
                 local_min = np.argmin(flexion[s_idx:e_idx])
                 cut_points.append(s_idx + local_min)
 
@@ -175,7 +203,7 @@ class adaptive_gait_cycle_segmentation:
             L = left_cycles_norm[i]  # (6, 100)
             R = right_cycles_norm[i]  # (6, 100)
 
-            combined = np.concatenate([L, R], axis=0)  # (18, 100)
+            combined = np.concatenate([L, R], axis=0)  # (12, 100)
             processed_samples_norm.append(combined)
 
             raw_pair = {

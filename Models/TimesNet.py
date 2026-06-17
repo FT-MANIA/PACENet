@@ -130,9 +130,7 @@ class DataEmbedding(nn.Module):
         return self.dropout(x)
 
 def FFT_for_Period(x, k=2):
-    # [B, T, C]
     xf = torch.fft.rfft(x, dim=1)
-    # 按照振幅寻找周期
     frequency_list = abs(xf).mean(0).mean(-1)
     frequency_list[0] = 0
     _, top_list = torch.topk(frequency_list, k)
@@ -189,26 +187,21 @@ class TimesNet(nn.Module):
         super(TimesNet, self).__init__()
         self.config = config
 
-        # 解析你传入的 config 字典
         self.seq_len = config['ts_len']
         self.c_in = config['ts_dim']
         self.num_classes = config['num_classes']
 
-        # 从 config 提取其他参数或设定默认值
         self.d_model = config.get('timesnet_d_model', 64)
         self.e_layers = config.get('timesnet_e_layers', 1)
         self.dropout_rate = config.get('timesnet_dropout', 0.3)
         self.embed_type = config.get('timesnet_embed', 'fixed')
         self.freq = config.get('timesnet_freq', 'h')
 
-        # 官方的特征嵌入模块
         self.enc_embedding = DataEmbedding(self.c_in, self.d_model, self.embed_type, self.freq, self.dropout_rate)
 
-        # 构建多个 TimesBlock
         self.layers = nn.ModuleList([TimesBlock(config) for _ in range(self.e_layers)])
         self.layer_norm = nn.LayerNorm(self.d_model)
 
-        # 分类任务专属输出层
         self.act = F.gelu
         self.dropout = nn.Dropout(self.dropout_rate)
 

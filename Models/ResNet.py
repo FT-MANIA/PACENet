@@ -48,7 +48,6 @@ class ResNet(nn.Module):
         in_channels = config['ts_dim']
         num_classes = config['num_classes']
 
-        # 标准时序 ResNet 结构：包含 3 个通道递增的残差块
         self.block1 = ResNetBlock(in_channels, 32)
         self.block2 = ResNetBlock(32, 64)
         self.block3 = ResNetBlock(64, 128)

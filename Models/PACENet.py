@@ -79,7 +79,7 @@ class SFE(nn.Module):
         x_windowed = x * self.window.view(1, 1, -1)
         x_fft = torch.fft.rfft(x_windowed, dim=-1)
         x_mag = torch.abs(x_fft)
-        x_log = torch.log(x_mag + 1e-6)  # [B, 12, Freq]
+        x_log = torch.log(x_mag + 1e-6)
         out = self.proj(x_log)
         return out
 
@@ -105,23 +105,23 @@ def kpf_calculator(cycles_raw):
         L_rom = np.max(cycle_L[idx_L['flex']]) - np.min(cycle_L[idx_L['flex']])
         R_rom = np.max(cycle_R[idx_R['flex']]) - np.min(cycle_R[idx_R['flex']])
 
-        # Extension Deficit
+        # ED
         L_ext = np.min(cycle_L[idx_L['flex']])
         R_ext = np.min(cycle_R[idx_R['flex']])
 
-        # Stance Peak
+        # StP
         L_peak = np.max(cycle_L[idx_L['flex'], :t_l_stance_end])
         R_peak = np.max(cycle_R[idx_R['flex'], :t_r_stance_end])
 
-        # 摆动相峰值
+        # SwP
         L_swing_peak = np.max(cycle_L[idx_L['flex']])
         R_swing_peak = np.max(cycle_R[idx_R['flex']])
 
-        # Varus Thrust 代理指标: 早期内翻活动范围
+        # EVVE
         L_thrust = np.max(cycle_L[idx_L['add'], :t_l_load_end]) - np.min(cycle_L[idx_L['add'], :t_l_load_end])
         R_thrust = np.max(cycle_R[idx_R['add'], :t_r_load_end]) - np.min(cycle_R[idx_R['add'], :t_r_load_end])
 
-        # AP Stability Index
+        # APTR
         L_ap = np.max(cycle_L[idx_L['ap']]) - np.min(cycle_L[idx_L['ap']])
         R_ap = np.max(cycle_R[idx_R['ap']]) - np.min(cycle_R[idx_R['ap']])
 

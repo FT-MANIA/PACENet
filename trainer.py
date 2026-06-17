@@ -2,6 +2,7 @@ import torch
 import numpy as np
 import logging
 import os
+import pandas as pd
 from utils import compute_metrics
 from tqdm import tqdm
 from collections import defaultdict
@@ -11,6 +12,13 @@ from torch.utils.data import DataLoader
 from sklearn.model_selection import StratifiedKFold
 from Dataset.data_augmentation import data_augmentor
 from Models.Exp_Models import exp_model
+from clinical_screening import (
+    fit_threshold_by_policy,
+    evaluate_screening_at_threshold,
+    evaluate_thresholded_three_class,
+    add_prefix,
+    summarize_screening_records,
+)
 
 logger = logging.getLogger('__main__')
 class Trainer:
@@ -132,7 +140,7 @@ def train_runner(config, model, trainer, epochs, fold, exp_name=''):
 
     return best_val_metrics, metrics_dev_test, metrics_ext_test, train_loss, val_loss
 
-def eval_sklearn_epoch(model, loader, config,epoch=0):
+def eval_sklearn_epoch(model, loader,epoch=0):
     y_true, y_pred, y_prob, y_demo, avg_loss = model.predict_prob_from_loader(loader)
 
     metrics = compute_metrics(
@@ -151,13 +159,13 @@ def eval_sklearn_epoch(model, loader, config,epoch=0):
 
     return metrics
 
-def sklearn_runner(config, model, train_loader, val_loader, dev_test_loader, ext_test_loader, fold, exp_name=''):
+def sklearn_runner(config, model, train_loader, val_loader, dev_test_loader, ext_test_loader, fold):
     logger.info(f"[TraditionalML] Fitting {config['model_type']} on fold {fold + 1}...")
     model.fit_from_loader(train_loader)
 
-    best_val_metrics = eval_sklearn_epoch(model, val_loader, config, epoch=0)
-    metrics_dev_test = eval_sklearn_epoch(model, dev_test_loader, config, epoch=0)
-    metrics_ext_test = eval_sklearn_epoch(model, ext_test_loader, config, epoch=0)
+    best_val_metrics = eval_sklearn_epoch(model, val_loader, epoch=0)
+    metrics_dev_test = eval_sklearn_epoch(model, dev_test_loader, epoch=0)
+    metrics_ext_test = eval_sklearn_epoch(model, ext_test_loader, epoch=0)
 
     train_loss = []
     val_loss = [best_val_metrics.get('loss', 0.0)]
@@ -183,7 +191,7 @@ def kfold_runner(exp_name, config_override, data, base_config):
     dev_test_reports, ext_test_reports = [], []
     all_train_loss, all_val_loss = [], []
     spectral_weights = []
-
+    clinical_screening_records = []
     best_model, ext_test_loader = None, None
 
     for fold, (train_idx, val_idx) in enumerate(skf.split(x_dev, y_dev)):
@@ -199,11 +207,7 @@ def kfold_runner(exp_name, config_override, data, base_config):
         if config['use_data_augmentation']:
             aug_config = {'jitter_std': 0.01, 'scale_range': [0.95, 1.05], 'rotation_range': [-5, 5],
                           'time_warp_knots': 4, 'magnitude_warp_std': 0.1, 'bias_range': [-3, 3],
-                          'koa_domain_aug_prob': config.get('koa_domain_aug_prob', 0.75),
-                          'smooth_kernel_size': config.get('smooth_kernel_size', 5),
 
-                          'use_koa_domain_aug': config.get('use_koa_domain_aug', False),
-                          'use_paired_center_bias': config.get('use_paired_center_bias', False),
                           'use_jitter': config.get('use_jitter', True),
                           'use_scaling': config.get('use_scaling', True),
                           'use_magnitude_warp': config.get('use_magnitude_warp', True),
@@ -242,8 +246,7 @@ def kfold_runner(exp_name, config_override, data, base_config):
                 val_loader=val_loader,
                 dev_test_loader=dev_test_loader,
                 ext_test_loader=ext_test_loader,
-                fold=fold,
-                exp_name=exp_name
+                fold=fold
             )
         else:
             model = model.to(config['device'])
@@ -261,6 +264,79 @@ def kfold_runner(exp_name, config_override, data, base_config):
                 fold=fold,
                 exp_name=exp_name
             )
+
+            if config.get("enable_clinical_screening", True):
+                abnormal_classes = tuple(config.get("screen_abnormal_classes", [1, 2]))
+                screening_policies = config.get(
+                    "screening_policies",
+                    [
+                        ("sensitivity", 0.95),
+                        ("sensitivity", 0.98),
+                        ("specificity", 0.95),
+                    ]
+                )
+
+                for policy, target_value in screening_policies:
+                    screen_val_fit = fit_threshold_by_policy(
+                        y_true=best_val_metrics["y_true"],
+                        y_prob=best_val_metrics["y_prob"],
+                        policy=policy,
+                        target_value=target_value,
+                        abnormal_classes=abnormal_classes
+                    )
+
+                    threshold = screen_val_fit["threshold"]
+                    policy_name = screen_val_fit["threshold_policy"]
+
+                    screen_val = evaluate_screening_at_threshold(
+                        y_true=best_val_metrics["y_true"],
+                        y_prob=best_val_metrics["y_prob"],
+                        threshold=threshold,
+                        abnormal_classes=abnormal_classes
+                    )
+
+                    screen_dev = evaluate_screening_at_threshold(
+                        y_true=dev_test_metrics["y_true"],
+                        y_prob=dev_test_metrics["y_prob"],
+                        threshold=threshold,
+                        abnormal_classes=abnormal_classes
+                    )
+
+                    screen_ext = evaluate_screening_at_threshold(
+                        y_true=ext_test_metrics["y_true"],
+                        y_prob=ext_test_metrics["y_prob"],
+                        threshold=threshold,
+                        abnormal_classes=abnormal_classes
+                    )
+
+                    screen_dev_3cls = evaluate_thresholded_three_class(
+                        y_true=dev_test_metrics["y_true"],
+                        y_prob=dev_test_metrics["y_prob"],
+                        threshold=threshold
+                    )
+
+                    screen_ext_3cls = evaluate_thresholded_three_class(
+                        y_true=ext_test_metrics["y_true"],
+                        y_prob=ext_test_metrics["y_prob"],
+                        threshold=threshold
+                    )
+
+                    record = {
+                        "experiment": exp_name,
+                        "fold": fold + 1,
+                        "policy": policy,
+                        "target_value": target_value,
+                        "policy_name": policy_name,
+                        "threshold": threshold,
+                    }
+
+                    record.update(add_prefix(screen_val, "val_screen"))
+                    record.update(add_prefix(screen_dev, "dev_screen"))
+                    record.update(add_prefix(screen_ext, "ext_screen"))
+                    record.update(add_prefix(screen_dev_3cls, "dev"))
+                    record.update(add_prefix(screen_ext_3cls, "ext"))
+
+                    clinical_screening_records.append(record)
 
         dev_test_reports.append(dev_test_metrics)
         ext_test_reports.append(ext_test_metrics)
@@ -289,6 +365,31 @@ def kfold_runner(exp_name, config_override, data, base_config):
         summary[f'ext_test_{k}_str'] = f"{np.mean(ext_test_values):.4f} ± {np.std(ext_test_values):.4f}"
 
     logger.info(f"Experiment {exp_name} Completed. Dev_Acc: {summary.get('dev_test_accuracy_str', 'N/A')} Test_Acc: {summary.get('ext_test_accuracy_str', 'N/A')}")
+
+    if config.get("enable_clinical_screening", True) and len(clinical_screening_records) > 0:
+        screening_df = pd.DataFrame(clinical_screening_records)
+
+        safe_exp_name = (
+            exp_name.replace(" ", "_")
+            .replace("/", "_")
+            .replace(":", "")
+            .replace("\\", "_")
+        )
+
+        screening_path = os.path.join(
+            config["save_dir"],
+            f"{safe_exp_name}_clinical_screening_folds.csv"
+        )
+
+        screening_df.to_csv(screening_path, index=False)
+        logger.info(f"[Clinical Screening] Fold-level screening metrics saved to: {screening_path}")
+
+        for policy_name, df_policy in screening_df.groupby("policy_name"):
+            records_policy = df_policy.to_dict("records")
+            screening_summary = summarize_screening_records(records_policy)
+
+            for k, v in screening_summary.items():
+                summary[f"clinical_{policy_name}_{k}"] = v
 
     return {
         'summary': summary,

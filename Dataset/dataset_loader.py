@@ -67,7 +67,7 @@ class build_dataset(Dataset):
 
         temp_kf = []
         valid_indices = []
-        # calculate the kf for kfe module
+
         for i in range(len(raw_data)):
             cycles_norm, cycles_raw = self.processor.process_subject(raw_data[i])
             if cycles_norm is None or len(cycles_norm) == 0: continue

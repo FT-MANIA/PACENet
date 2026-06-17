@@ -158,8 +158,6 @@ class FeatureBasedTraditionalML:
         X, y_true, demo = self._collect_loader_features(loader)
 
         prob = self.classifier.predict_proba(X)
-
-        # Align probability columns to [0, 1, ..., num_classes-1]
         aligned_prob = np.zeros((prob.shape[0], self.num_classes), dtype=np.float32)
 
         for col_idx, cls in enumerate(self.classes_):

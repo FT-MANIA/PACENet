@@ -9,9 +9,10 @@ import seaborn as sns
 import pandas as pd
 from collections import defaultdict
 from utils import compute_metrics
-from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score, f1_score, average_precision_score
+from sklearn.metrics import roc_curve, roc_auc_score, accuracy_score, f1_score, average_precision_score, precision_recall_curve
 from sklearn.preprocessing import label_binarize
 from scipy.ndimage import gaussian_filter1d
+from scipy.stats import wilcoxon
 
 logging.basicConfig(format='%(asctime)s | %(levelname)s : %(message)s', level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -93,9 +94,9 @@ def attn_weight_extractor(results, device, class_names):
     model.eval()
     found_counts = {0: 0, 1: 0, 2: 0}
     target = {
-        'Healthy': ['1', '2', '3'],
-        'ACLD': ['38', '51', '67'],
-        'KOA': ['5', '13', '110']
+        'Healthy': ['23'],
+        'ACLD': ['69'],
+        'KOA': ['18']
     }
 
     with torch.no_grad():
@@ -117,9 +118,10 @@ def attn_weight_extractor(results, device, class_names):
                 label_name = class_names[true_label]
 
                 orig_id = trace_info.get('original_id', [])[i]
+                acld_side = trace_info.get('acld_side', [])[i]
 
                 is_target = False
-                if orig_id in target[label_name]: is_target = True
+                if orig_id in target[label_name] and true_label == pred_label: is_target = True
 
                 if is_target:
                     attn_left_2d, attn_right_2d = captured_attns[0][i], captured_attns[1][i]
@@ -136,13 +138,15 @@ def attn_weight_extractor(results, device, class_names):
                         'attn_left_1d': attn_left_1d,
                         'attn_right_1d': attn_right_1d,
                         'image_filename': image_filename,
-                        'label_name': label_name
+                        'label_name': label_name,
+                        'acld_side': acld_side,
+                        'orig_id': orig_id
                     })
                     found_counts[true_label] += 1
                     target[label_name].remove(orig_id)
     return attn_weight
 
-def plot_kfold_confusion_matrix(cms, class_names, save_dir, name='kfold_overall_cm.png'):
+def plot_kfold_confusion_matrix(cms, class_names, save_dir, title, name='kfold_overall_cm.png'):
     cms = np.array(cms)
     K, n_classes, _ = cms.shape
     cm_sum = np.sum(cms, axis=0)
@@ -167,7 +171,7 @@ def plot_kfold_confusion_matrix(cms, class_names, save_dir, name='kfold_overall_
                 xticklabels=class_names, yticklabels=class_names,
                 vmin=0, vmax=100, annot_kws={"size": 11, "weight": "bold"})
 
-    plt.title(f'Confusion Matrix', fontsize=14, pad=15, weight='bold')
+    plt.title(title, fontsize=14, pad=15, weight='bold')
     plt.ylabel('True Label', fontsize=12, weight='bold')
     plt.xlabel('Predicted Label', fontsize=12, weight='bold')
     plt.xticks(fontsize=11)
@@ -249,8 +253,6 @@ def plot_class_spectral_energy(x, y, class_names, fs, save_dir, name='class_spec
             star_handles.append(star)
             star_labels.append(f'{class_name}: f ≈ {peak_f:.1f} Hz, E ≈ {peak_e:.1f}')
 
-    ax.set_title('Average Log-Spectral Energy Distribution Across Clinical Groups',
-                 fontsize=16, weight='bold', pad=15)
     ax.set_xlabel('Frequency (Hz)', fontsize=14, weight='bold')
     ax.set_ylabel('Mean Log-Spectral Energy', fontsize=14, weight='bold')
 
@@ -295,6 +297,8 @@ def plot_multi_model_roc_comparison(benchmark_results_dict, n_classes, save_dir,
     legend_data = []
 
     for model_name, data in benchmark_results_dict.items():
+        if model_name == 'SVM' or model_name == 'XGBoost':
+            continue
         y_true_list = data[f'{model}_y_true_list']
         y_prob_list = data[f'{model}_y_prob_list']
         k_folds = len(y_true_list)
@@ -351,7 +355,7 @@ def plot_multi_model_roc_comparison(benchmark_results_dict, n_classes, save_dir,
 
             is_ours = 'Ours' in model_name or 'PACENet' in model_name
             color = '#d62728' if is_ours else base_colors[color_idx % len(base_colors)]
-            lw = 3.5 if is_ours else 1.5
+            lw = 4.5 if is_ours else 3.0
             zorder = 10 if is_ours else 5
 
             if not is_ours: color_idx += 1
@@ -382,20 +386,526 @@ def plot_multi_model_roc_comparison(benchmark_results_dict, n_classes, save_dir,
     plt.xlabel('False Positive Rate (1 − Specificity)', fontsize=16, weight='bold')
     plt.ylabel('True Positive Rate (Sensitivity)', fontsize=16, weight='bold')
 
-    title_str = None
-    if model == 'ext_test':
-        title_str = f'Macro-Averaged ROC Curves of Different Models on the Ext Test Set'
-    if model == 'dev_test':
-        title_str = f'Macro-Averaged ROC Curves of Different Models on the Dev Test Set'
-    plt.title(title_str, fontsize=18, weight='bold', pad=15)
+    plt.xticks(np.arange(0, 1.1, 0.2), fontsize=12)
+    plt.yticks(np.arange(0, 1.1, 0.2), fontsize=12)
+
+    legend = plt.legend(loc="lower right", fontsize=18, framealpha=0.95, edgecolor='black', fancybox=True)
+    for text, item in zip(legend.get_texts(), legend_data):
+        if 'PACENet' in item['name']:
+            text.set_fontweight('bold')
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, name)
+    plt.savefig(save_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+def plot_both_dev_ext_roc_comparison(benchmark_results_dict, n_classes, save_dir, name):
+    mpl.rcParams['font.family'] = 'Times New Roman'
+    mpl.rcParams['font.serif'] = ['Times New Roman']
+    mpl.rcParams['mathtext.fontset'] = 'stix'
+    mpl.rcParams['axes.unicode_minus'] = False
+
+    plt.figure(figsize=(18, 11))
+    mean_fpr = np.linspace(0, 1, 100)
+
+    target_models = ['PACENet', 'SVM', 'XGBoost']
+
+    model_colors = {
+        'PACENet': '#d62728',
+        'SVM': '#1f77b4',
+        'XGBoost': '#ff7f0e'
+    }
+
+    dataset_styles = [
+        {
+            'key': 'dev_test',
+            'label': 'Internal',
+            'linestyle': '-',
+            'alpha': 0.95
+        },
+        {
+            'key': 'ext_test',
+            'label': 'External',
+            'linestyle': '--',
+            'alpha': 0.65
+        }
+    ]
+
+    legend_data = []
+
+    for dataset_info in dataset_styles:
+        dataset_key = dataset_info['key']
+        dataset_label = dataset_info['label']
+        linestyle = dataset_info['linestyle']
+        alpha = dataset_info['alpha']
+
+        for model_name, data in benchmark_results_dict.items():
+
+            if model_name not in target_models:
+                continue
+
+            y_true_key = f'{dataset_key}_y_true_list'
+            y_prob_key = f'{dataset_key}_y_prob_list'
+
+            if y_true_key not in data or y_prob_key not in data:
+                print(f"[Warning] {model_name} does not contain {y_true_key} or {y_prob_key}, skip.")
+                continue
+
+            y_true_list = data[y_true_key]
+            y_prob_list = data[y_prob_key]
+            k_folds = len(y_true_list)
+
+            fold_aucs = []
+            all_classes_mean_tpr = []
+
+            for i in range(k_folds):
+                y_true = y_true_list[i]
+                y_prob = y_prob_list[i]
+
+                if n_classes == 2:
+                    y_true_bin = (y_true == 1).astype(int)
+                    y_prob_pos = y_prob[:, 1]
+
+                    if len(np.unique(y_true_bin)) >= 2:
+                        fold_aucs.append(roc_auc_score(y_true_bin, y_prob_pos))
+
+                else:
+                    valid_aucs = []
+                    for c in range(n_classes):
+                        y_true_c = (y_true == c).astype(int)
+                        y_prob_c = y_prob[:, c]
+
+                        if len(np.unique(y_true_c)) >= 2:
+                            valid_aucs.append(roc_auc_score(y_true_c, y_prob_c))
+
+                    if valid_aucs:
+                        fold_aucs.append(np.mean(valid_aucs))
+
+            real_auc_mean = np.mean(fold_aucs) if len(fold_aucs) > 0 else np.nan
+
+            classes_to_plot = [1] if n_classes == 2 else range(n_classes)
+
+            for c in classes_to_plot:
+                tprs = []
+
+                for i in range(k_folds):
+                    y_true = y_true_list[i]
+                    y_prob = y_prob_list[i]
+
+                    y_true_bin = (y_true == c).astype(int)
+                    y_prob_c = y_prob[:, c]
+
+                    if len(np.unique(y_true_bin)) < 2:
+                        continue
+
+                    fpr, tpr, _ = roc_curve(y_true_bin, y_prob_c)
+                    interp_tpr = np.interp(mean_fpr, fpr, tpr)
+                    interp_tpr[0] = 0.0
+                    tprs.append(interp_tpr)
+
+                if len(tprs) > 0:
+                    mean_tpr = np.mean(tprs, axis=0)
+                    mean_tpr[-1] = 1.0
+                    all_classes_mean_tpr.append(mean_tpr)
+
+            if len(all_classes_mean_tpr) > 0:
+                final_mean_tpr = np.mean(all_classes_mean_tpr, axis=0)
+                final_mean_tpr[-1] = 1.0
+
+                is_ours = 'Ours' in model_name or 'PACENet' in model_name
+
+                legend_data.append({
+                    'name': 'PACENet' if is_ours else model_name,
+                    'dataset_label': dataset_label,
+                    'auc': real_auc_mean,
+                    'fpr': mean_fpr,
+                    'tpr': final_mean_tpr,
+                    'color': model_colors.get(model_name, '#7f7f7f'),
+                    'linestyle': linestyle,
+                    'alpha': alpha,
+                    'lw': 9.0 if is_ours else 6.0,
+                    'zorder': 10 if is_ours else 5,
+                    'is_ours': is_ours
+                })
+
+    dataset_order = {
+        'Internal': 0,
+        'External': 1
+    }
+
+    model_order = {
+        'PACENet': 0,
+        'SVM': 1,
+        'XGBoost': 2
+    }
+
+    legend_data.sort(
+        key=lambda x: (
+            dataset_order.get(x['dataset_label'], 99),
+            model_order.get(x['name'], 99)
+        )
+    )
+
+    for item in legend_data:
+        plt.plot(
+            item['fpr'],
+            item['tpr'],
+            label=f"{item['name']} {item['dataset_label']} ({item['auc']:.4f})",
+            color=item['color'],
+            linestyle=item['linestyle'],
+            lw=item['lw'],
+            zorder=item['zorder'],
+            alpha=item['alpha']
+        )
+
+    plt.plot(
+        [0, 1],
+        [0, 1],
+        linestyle='--',
+        lw=2,
+        color='gray',
+        label='Chance',
+        alpha=.8
+    )
+
+    plt.xlim([-0.02, 1.02])
+    plt.ylim([-0.02, 1.02])
+
+    plt.xlabel('False Positive Rate (1 − Specificity)', fontsize=24, weight='bold')
+    plt.ylabel('True Positive Rate (Sensitivity)', fontsize=24, weight='bold')
+
+    plt.xticks(np.arange(0, 1.1, 0.2), fontsize=20)
+    plt.yticks(np.arange(0, 1.1, 0.2), fontsize=20)
+
+    legend = plt.legend(
+        loc="lower right",
+        fontsize=28,
+        framealpha=0.95,
+        edgecolor='black',
+        fancybox=True
+    )
+
+    for text in legend.get_texts():
+        if 'PACENet' in text.get_text():
+            text.set_fontweight('bold')
+
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, name)
+    plt.savefig(save_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+def plot_multi_model_pr_comparison(benchmark_results_dict, n_classes, save_dir, model='test', name='multi_model_pr_comparison.png'):
+    mpl.rcParams['font.family'] = 'Times New Roman'
+    mpl.rcParams['font.serif'] = ['Times New Roman']
+    mpl.rcParams['mathtext.fontset'] = 'stix'
+    mpl.rcParams['axes.unicode_minus'] = False
+
+    plt.figure(figsize=(10, 8))
+    mean_recall = np.linspace(0, 1, 100)
+
+    base_colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#9467bd', '#8c564b',
+                   '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#aec7e8']
+
+    color_idx = 0
+    legend_data = []
+
+    for model_name, data in benchmark_results_dict.items():
+        if model_name == 'SVM' or model_name == 'XGBoost':
+            continue
+        y_true_list = data[f'{model}_y_true_list']
+        y_prob_list = data[f'{model}_y_prob_list']
+        k_folds = len(y_true_list)
+
+        fold_aps = []
+        all_classes_mean_precision = []
+
+        for i in range(k_folds):
+            y_true = y_true_list[i]
+            y_prob = y_prob_list[i]
+
+            if n_classes == 2:
+                y_true_bin = (y_true == 1).astype(int)
+                y_prob_pos = y_prob[:, 1]
+                if len(np.unique(y_true_bin)) >= 2:
+                    fold_aps.append(average_precision_score(y_true_bin, y_prob_pos))
+            else:
+                valid_aps = []
+                for c in range(n_classes):
+                    y_true_c = (y_true == c).astype(int)
+                    y_prob_c = y_prob[:, c]
+                    if len(np.unique(y_true_c)) >= 2:
+                        valid_aps.append(average_precision_score(y_true_c, y_prob_c))
+                if valid_aps:
+                    fold_aps.append(np.mean(valid_aps))
+
+        real_ap_mean = np.mean(fold_aps)
+
+        classes_to_plot = [1] if n_classes == 2 else range(n_classes)
+
+        for c in classes_to_plot:
+            prs = []
+            for i in range(k_folds):
+                y_true = y_true_list[i]
+                y_prob = y_prob_list[i]
+                y_true_bin = (y_true == c).astype(int)
+                y_prob_c = y_prob[:, c]
+
+                if len(np.unique(y_true_bin)) < 2: continue
+
+                precision, recall, _ = precision_recall_curve(y_true_bin, y_prob_c)
+                interp_pr = np.interp(mean_recall, recall[::-1], precision[::-1])
+                prs.append(interp_pr)
+
+            if len(prs) > 0:
+                mean_precision = np.mean(prs, axis=0)
+                all_classes_mean_precision.append(mean_precision)
+
+        if len(all_classes_mean_precision) > 0:
+            final_mean_precision = np.mean(all_classes_mean_precision, axis=0)
+
+            is_ours = 'Ours' in model_name or 'PACENet' in model_name
+            color = '#d62728' if is_ours else base_colors[color_idx % len(base_colors)]
+            lw = 4.5 if is_ours else 3.0
+            zorder = 10 if is_ours else 5
+
+            if not is_ours: color_idx += 1
+
+            if is_ours: model_name = 'PACENet'
+            legend_data.append({
+                'name': model_name,
+                'ap': real_ap_mean,
+                'recall': mean_recall,
+                'precision': final_mean_precision,
+                'color': color,
+                'lw': lw,
+                'zorder': zorder,
+                'is_ours': is_ours
+            })
+
+    legend_data.sort(key=lambda x: x['ap'], reverse=True)
+
+    for item in legend_data:
+        plt.plot(item['recall'], item['precision'], label=f"{item['name']} ({item['ap']:.4f})",
+                 color=item['color'], lw=item['lw'], zorder=item['zorder'],
+                 alpha=0.9 if item['is_ours'] else 0.8)
+
+    plt.xlim([-0.02, 1.02])
+    plt.ylim([-0.02, 1.02])
+
+    plt.xlabel('Recall', fontsize=16, weight='bold')
+    plt.ylabel('Precision', fontsize=16, weight='bold')
 
     plt.xticks(np.arange(0, 1.1, 0.2), fontsize=12)
     plt.yticks(np.arange(0, 1.1, 0.2), fontsize=12)
 
-    legend = plt.legend(loc="lower right", fontsize=16, framealpha=0.95, edgecolor='black', fancybox=True)
+    legend = plt.legend(loc="lower left", fontsize=18, framealpha=0.95, edgecolor='black', fancybox=True)
     for text, item in zip(legend.get_texts(), legend_data):
         if 'PACENet' in item['name']:
             text.set_fontweight('bold')
+    plt.grid(True, linestyle='--', alpha=0.6)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    save_path = os.path.join(save_dir, name)
+    plt.savefig(save_path, dpi=600, bbox_inches='tight')
+    plt.close()
+
+def plot_both_dev_ext_pr_comparison(benchmark_results_dict, n_classes, save_dir, name):
+    mpl.rcParams['font.family'] = 'Times New Roman'
+    mpl.rcParams['font.serif'] = ['Times New Roman']
+    mpl.rcParams['mathtext.fontset'] = 'stix'
+    mpl.rcParams['axes.unicode_minus'] = False
+
+    plt.figure(figsize=(18, 11))
+    mean_recall = np.linspace(0, 1, 100)
+
+    target_models = ['PACENet', 'SVM', 'XGBoost']
+
+    model_colors = {
+        'PACENet': '#d62728',
+        'SVM': '#1f77b4',
+        'XGBoost': '#ff7f0e'
+    }
+
+    dataset_styles = [
+        {
+            'key': 'dev_test',
+            'label': 'Internal',
+            'linestyle': '-',
+            'alpha': 0.95
+        },
+        {
+            'key': 'ext_test',
+            'label': 'External',
+            'linestyle': '--',
+            'alpha': 0.65
+        }
+    ]
+
+    legend_data = []
+
+    for dataset_info in dataset_styles:
+        dataset_key = dataset_info['key']
+        dataset_label = dataset_info['label']
+        linestyle = dataset_info['linestyle']
+        alpha = dataset_info['alpha']
+
+        for model_name, data in benchmark_results_dict.items():
+
+            if model_name not in target_models:
+                continue
+
+            y_true_key = f'{dataset_key}_y_true_list'
+            y_prob_key = f'{dataset_key}_y_prob_list'
+
+            if y_true_key not in data or y_prob_key not in data:
+                print(f"[Warning] {model_name} does not contain {y_true_key} or {y_prob_key}, skip.")
+                continue
+
+            y_true_list = data[y_true_key]
+            y_prob_list = data[y_prob_key]
+            k_folds = len(y_true_list)
+
+            fold_aps = []
+            all_classes_mean_precision = []
+
+            for i in range(k_folds):
+                y_true = y_true_list[i]
+                y_prob = y_prob_list[i]
+
+                if n_classes == 2:
+                    y_true_bin = (y_true == 1).astype(int)
+                    y_prob_pos = y_prob[:, 1]
+
+                    if len(np.unique(y_true_bin)) >= 2:
+                        fold_aps.append(
+                            average_precision_score(y_true_bin, y_prob_pos)
+                        )
+
+                else:
+                    valid_aps = []
+
+                    for c in range(n_classes):
+                        y_true_c = (y_true == c).astype(int)
+                        y_prob_c = y_prob[:, c]
+
+                        if len(np.unique(y_true_c)) >= 2:
+                            valid_aps.append(
+                                average_precision_score(y_true_c, y_prob_c)
+                            )
+
+                    if valid_aps:
+                        fold_aps.append(np.mean(valid_aps))
+
+            real_ap_mean = np.mean(fold_aps) if len(fold_aps) > 0 else np.nan
+
+            classes_to_plot = [1] if n_classes == 2 else range(n_classes)
+
+            for c in classes_to_plot:
+                prs = []
+
+                for i in range(k_folds):
+                    y_true = y_true_list[i]
+                    y_prob = y_prob_list[i]
+
+                    y_true_bin = (y_true == c).astype(int)
+                    y_prob_c = y_prob[:, c]
+
+                    if len(np.unique(y_true_bin)) < 2:
+                        continue
+
+                    precision, recall, _ = precision_recall_curve(
+                        y_true_bin,
+                        y_prob_c
+                    )
+
+                    interp_precision = np.interp(
+                        mean_recall,
+                        recall[::-1],
+                        precision[::-1]
+                    )
+
+                    prs.append(interp_precision)
+
+                if len(prs) > 0:
+                    mean_precision = np.mean(prs, axis=0)
+                    all_classes_mean_precision.append(mean_precision)
+
+            if len(all_classes_mean_precision) > 0:
+                final_mean_precision = np.mean(all_classes_mean_precision, axis=0)
+
+                is_ours = 'Ours' in model_name or 'PACENet' in model_name
+
+                legend_data.append({
+                    'name': 'PACENet' if is_ours else model_name,
+                    'dataset_label': dataset_label,
+                    'ap': real_ap_mean,
+                    'recall': mean_recall,
+                    'precision': final_mean_precision,
+                    'color': model_colors.get(model_name, '#7f7f7f'),
+                    'linestyle': linestyle,
+                    'alpha': alpha,
+                    'lw': 7.0 if is_ours else 4.0,
+                    'zorder': 10 if is_ours else 5,
+                    'is_ours': is_ours
+                })
+
+    dataset_order = {
+        'Internal': 0,
+        'External': 1
+    }
+
+    model_order = {
+        'PACENet': 0,
+        'SVM': 1,
+        'XGBoost': 2
+    }
+
+    legend_data.sort(
+        key=lambda x: (
+            dataset_order.get(x['dataset_label'], 99),
+            model_order.get(x['name'], 99)
+        )
+    )
+
+    for item in legend_data:
+        plt.plot(
+            item['recall'],
+            item['precision'],
+            label=f"{item['name']} {item['dataset_label']} ({item['ap']:.4f})",
+            color=item['color'],
+            linestyle=item['linestyle'],
+            lw=item['lw'],
+            zorder=item['zorder'],
+            alpha=item['alpha']
+        )
+
+    plt.xlim([-0.02, 1.02])
+    plt.ylim([-0.02, 1.02])
+
+    plt.xlabel('Recall', fontsize=24, weight='bold')
+    plt.ylabel('Precision', fontsize=24, weight='bold')
+
+    plt.xticks(np.arange(0, 1.1, 0.2), fontsize=20)
+    plt.yticks(np.arange(0, 1.1, 0.2), fontsize=20)
+
+    legend = plt.legend(
+        loc="lower left",
+        fontsize=28,
+        framealpha=0.95,
+        edgecolor='black',
+        fancybox=True
+    )
+
+    for text in legend.get_texts():
+        if 'PACENet' in text.get_text():
+            text.set_fontweight('bold')
+
     plt.grid(True, linestyle='--', alpha=0.6)
 
     plt.tight_layout()
@@ -474,6 +984,8 @@ def plot_multi_model_metric_boxplots(benchmark_results_dict, n_classes, save_dir
     color_idx = 0
 
     for model_name, data in benchmark_results_dict.items():
+        if model_name == 'SVM' or model_name == 'XGBoost':
+            continue
         y_true_key = f'{model}_y_true_list'
         y_prob_key = f'{model}_y_prob_list'
 
@@ -574,10 +1086,6 @@ def plot_multi_model_metric_boxplots(benchmark_results_dict, n_classes, save_dir
 
     metric_name = 'Macro-Averaged F1-score' if metric == 'f1' else 'Accuracy'
 
-    if model == 'dev_test':
-        plt.title(f'{metric_name} of Different Models on the Dev Test Set', fontsize=18, weight='bold', pad=15)
-    else:
-        plt.title(f'{metric_name} of Different Models on the Ext Test Set', fontsize=18, weight='bold', pad=15)
     plt.xlabel('Models', fontsize=16, weight='bold')
     plt.ylabel(metric_name, fontsize=16, weight='bold')
 
@@ -891,15 +1399,6 @@ def plot_ablation_metric_boxplots(results_dict, n_classes, save_dir, model='test
     }
     metric_name = metric_name_map[metric]
 
-    dataset_name = 'Dev Test Set' if model == 'dev_test' else 'Ext Test Set'
-    experiment_group = 'Architecture' if experiment_group == 'architecture' else 'Augmentation'
-
-    ax.set_title(
-        f'{metric_name} Across {experiment_group} Ablation on the {dataset_name}',
-        fontsize=18,
-        weight='bold',
-        pad=15
-    )
     ax.set_xlabel('Model', fontsize=18, weight='bold')
     ax.set_ylabel(metric_name, fontsize=18, weight='bold')
 
@@ -1236,14 +1735,12 @@ def plot_paired_delta_metric(results_dict, n_classes, save_dir, model='test', me
         'auprc': 'Macro-Averaged AUPRC'
     }
     metric_name = metric_name_map[metric]
-    dataset_name = 'Dev Test Set' if model == 'dev_test' else 'Ext Test Set'
 
     group_title_map = {
         'architecture': 'Architecture Ablation',
         'augmentation': 'Augmentation Ablation',
         'all': 'ablation'
     }
-    group_title = group_title_map.get(experiment_group, 'ablation')
 
     if figsize is None:
         figsize = (9, max(4.8, 0.75 * len(plot_data) + 2.0))
@@ -1319,13 +1816,6 @@ def plot_paired_delta_metric(results_dict, n_classes, save_dir, model='test', me
         ylabel += " (percentage points)"
     ax.set_ylabel(ylabel, fontsize=18, fontweight='bold')
     ax.set_xlabel('Model', fontsize=18, fontweight='bold')
-
-    ax.set_title(
-        f'Paired Δ{metric_name} After {group_title} on the {dataset_name}',
-        fontsize=18,
-        fontweight='bold',
-        pad=16
-    )
 
     ax.grid(axis='y', linestyle='--', alpha=0.45)
     ax.grid(axis='x', linestyle='-', alpha=0.12)
@@ -1440,12 +1930,120 @@ def plot_raw_signal_attention(plot_data, save_dir, kernel_size=40, stride=3):
         axes[0, 1].set_title('Right Leg', fontsize=14, weight='bold', pad=10)
         axes[-1, 0].set_xlabel('Time Steps', fontsize=12, weight='bold')
         axes[-1, 1].set_xlabel('Time Steps', fontsize=12, weight='bold')
-        # plt.suptitle('Bilateral Asymmetry Highlighted by Exact Receptive Field Mapping', fontsize=18, weight='bold', y=1.02)
 
         plt.tight_layout()
         os.makedirs(save_dir, exist_ok=True)
         plt.savefig(os.path.join(save_dir, name), dpi=600, bbox_inches='tight')
         plt.close()
+
+def plot_acld_affected_vs_unaffected_attention(plot_data, save_dir, kernel_size=40, stride=3):
+    mpl.rcParams['font.family'] = 'Times New Roman'
+    mpl.rcParams['font.serif'] = ['Times New Roman']
+    mpl.rcParams['mathtext.fontset'] = 'stix'
+    mpl.rcParams['axes.unicode_minus'] = False
+
+    def map_attention_to_signal(attn_1d, raw_signal):
+        _, time_steps = raw_signal.shape
+        seq_len = len(attn_1d)
+        attn_upsampled = np.zeros(time_steps)
+
+        sigma_window = kernel_size / 6.0
+        x = np.arange(kernel_size)
+        gaussian_window = np.exp(-0.5 * ((x - kernel_size / 2) / sigma_window) ** 2)
+
+        for i in range(seq_len):
+            start_idx = i * stride
+            end_idx = min(start_idx + kernel_size, time_steps)
+            actual_len = end_idx - start_idx
+            weighted_attn = attn_1d[i] * gaussian_window[:actual_len]
+            attn_upsampled[start_idx:end_idx] = np.maximum(
+                attn_upsampled[start_idx:end_idx],
+                weighted_attn
+            )
+
+        attn_norm = (attn_upsampled - np.min(attn_upsampled)) / (np.max(attn_upsampled) - np.min(attn_upsampled) + 1e-8)
+        attn_sharpened = attn_norm ** 3
+        attn_smooth = gaussian_filter1d(attn_sharpened, sigma=4)
+
+        attn_smooth = (attn_smooth - np.min(attn_smooth)) / (np.max(attn_smooth) - np.min(attn_smooth) + 1e-8)
+
+        return attn_smooth
+
+    channel_names = ['L_AA_Angle', 'L_IER_Angle', 'L_FE_Angle', 'L_AP_Translation', 'L_PD_Translation',
+                     'L_ML_Translation',
+                     'R_AA_Angle', 'R_IER_Angle', 'R_FE_Angle', 'R_AP_Translation', 'R_PD_Translation',
+                     'R_ML_Translation']
+
+    for item in plot_data['attn_weight']:
+        if item['label_name'] != 'ACLD':
+            continue
+        raw_signal = item['raw_signal']
+        _, time_steps = raw_signal.shape
+        acld_side = item['acld_side']
+        orig_id = item['orig_id']
+
+        name = f'ACLD_affected_vs_unaffected_attention_ID_{orig_id}.png'
+
+        attn_left = map_attention_to_signal(item['attn_left_1d'], raw_signal)
+        attn_right = map_attention_to_signal(item['attn_right_1d'], raw_signal)
+
+        if acld_side == 'L':
+            affected_signal = raw_signal[:6]
+            unaffected_signal = raw_signal[6:]
+            affected_attn = attn_left
+            unaffected_attn = attn_right
+        else:
+            affected_signal = raw_signal[6:]
+            unaffected_signal = raw_signal[:6]
+            affected_attn = attn_right
+            unaffected_attn = attn_left
+
+        cmap = plt.get_cmap('jet')
+
+        fig, axes = plt.subplots(6, 2, figsize=(16, 12), sharex=True)
+        x_time = np.arange(time_steps)
+
+        for row in range(6):
+            ax_l = axes[row, 0]
+            sig_l = affected_signal[row]
+            ymin_l, ymax_l = np.min(sig_l) - 0.5, np.max(sig_l) + 0.5
+
+            ax_l.imshow(affected_attn[np.newaxis, :], cmap=cmap, aspect='auto',
+                        extent=[0, time_steps, ymin_l, ymax_l], alpha=0.5, vmin=0, vmax=1,
+                        interpolation='bicubic')
+            ax_l.plot(x_time, sig_l, color='black', linewidth=1.2)
+            ax_l.set_ylabel(channel_names[row], fontsize=11, weight='bold')
+            ax_l.set_ylim(ymin_l, ymax_l)
+            ax_l.set_xlim(0, time_steps)
+            ax_l.set_yticks([])
+            ax_l.spines['top'].set_visible(False)
+            ax_l.spines['right'].set_visible(False)
+
+            ax_r = axes[row, 1]
+            sig_r = unaffected_signal[row]
+            ymin_r, ymax_r = np.min(sig_r) - 0.5, np.max(sig_r) + 0.5
+
+            ax_r.imshow(unaffected_attn[np.newaxis, :], cmap=cmap, aspect='auto',
+                        extent=[0, time_steps, ymin_r, ymax_r], alpha=0.5, vmin=0, vmax=1,
+                        interpolation='bicubic')
+            ax_r.plot(x_time, sig_r, color='black', linewidth=1.2)
+            ax_r.set_ylabel(channel_names[row + 6], fontsize=11, weight='bold')
+            ax_r.set_ylim(ymin_r, ymax_r)
+            ax_r.set_xlim(0, time_steps)
+            ax_r.set_yticks([])
+            ax_r.spines['top'].set_visible(False)
+            ax_r.spines['right'].set_visible(False)
+
+        axes[0, 0].set_title('Affected Leg', fontsize=14, weight='bold', pad=10)
+        axes[0, 1].set_title('Unaffected Leg', fontsize=14, weight='bold', pad=10)
+        axes[-1, 0].set_xlabel('Time Steps', fontsize=12, weight='bold')
+        axes[-1, 1].set_xlabel('Time Steps', fontsize=12, weight='bold')
+
+        plt.tight_layout()
+        os.makedirs(save_dir, exist_ok=True)
+        plt.savefig(os.path.join(save_dir, name), dpi=600, bbox_inches='tight')
+        plt.close()
+
 
 def plot_spectral_weights(plot_data, save_dir, in_channels=12, seq_len=600, fs=60, name='spectral_weights.png'):
 
@@ -1478,7 +2076,6 @@ def plot_spectral_weights(plot_data, save_dir, in_channels=12, seq_len=600, fs=6
         y_val = freq_importance[idx]
         ax.vlines(x=x_val, ymin=0, ymax=y_val, colors='#666666', linestyles='--', linewidth=1.5, alpha=0.8, zorder=2)
 
-    ax.set_title('Frequency-wise Weight Magnitude in the SFE Linear Layer', fontsize=16, weight='bold', pad=15)
     ax.set_xlabel('Frequency (Hz)', fontsize=14, weight='bold')
     ax.set_ylabel('Mean Absolute Weight', fontsize=14, weight='bold')
 
@@ -1497,3 +2094,236 @@ def plot_spectral_weights(plot_data, save_dir, in_channels=12, seq_len=600, fs=6
     plt.close()
 
     logger.info(f"The visualization graph of frequency domain feature weights has been saved to: {os.path.join(save_dir, name)}")
+
+def plot_kfold_dca_curve(y_true_list, y_prob_list, task_name, save_dir, name='kfold_dca_curve.png', positive_classes=(1, 2),
+    model_label='PACENet', threshold_min=0.01, threshold_max=0.80, n_thresholds=100, show_std=True):
+    thresholds = np.linspace(threshold_min, threshold_max, n_thresholds)
+
+    k_folds = len(y_true_list)
+    model_net_benefits = []
+    treat_all_net_benefits = []
+
+    for i in range(k_folds):
+        y_true = np.asarray(y_true_list[i]).astype(int)
+        y_prob = np.asarray(y_prob_list[i])
+
+        y_true_bin = np.isin(y_true, list(positive_classes)).astype(int)
+
+        if y_prob.ndim == 1:
+            positive_score = y_prob
+
+        elif y_prob.ndim == 2:
+            if y_prob.shape[1] == 2:
+                positive_score = y_prob[:, 1]
+
+            else:
+                positive_score = y_prob[:, list(positive_classes)].sum(axis=1)
+
+        else:
+            raise ValueError(f"Unsupported y_prob shape: {y_prob.shape}")
+
+        n = len(y_true_bin)
+
+        fold_model_nb = []
+        fold_all_nb = []
+
+        for pt in thresholds:
+            preds = (positive_score >= pt).astype(int)
+
+            tp = np.sum((preds == 1) & (y_true_bin == 1))
+            fp = np.sum((preds == 1) & (y_true_bin == 0))
+
+            nb_model = (tp / n) - (fp / n) * (pt / (1 - pt))
+            fold_model_nb.append(nb_model)
+
+            tp_all = np.sum(y_true_bin == 1)
+            fp_all = np.sum(y_true_bin == 0)
+
+            nb_all = (tp_all / n) - (fp_all / n) * (pt / (1 - pt))
+            fold_all_nb.append(nb_all)
+
+        model_net_benefits.append(fold_model_nb)
+        treat_all_net_benefits.append(fold_all_nb)
+
+    model_net_benefits = np.asarray(model_net_benefits)
+    treat_all_net_benefits = np.asarray(treat_all_net_benefits)
+
+    mean_model_nb = np.mean(model_net_benefits, axis=0)
+    std_model_nb = np.std(model_net_benefits, axis=0)
+
+    mean_all_nb = np.mean(treat_all_net_benefits, axis=0)
+
+    plt.figure(figsize=(18, 11))
+
+    plt.plot(
+        thresholds,
+        np.zeros_like(thresholds),
+        color='black',
+        linewidth=4.0,
+        linestyle='--',
+        label='Treat None'
+    )
+
+    plt.plot(
+        thresholds,
+        mean_all_nb,
+        color='gray',
+        linewidth=4.0,
+        linestyle=':',
+        label='Treat All'
+    )
+
+    plt.plot(
+        thresholds,
+        mean_model_nb,
+        color='#d62728',
+        linewidth=8.0,
+        label=f'{model_label}'
+    )
+
+    if show_std:
+        plt.fill_between(
+            thresholds,
+            mean_model_nb - std_model_nb,
+            mean_model_nb + std_model_nb,
+            color='#d62728',
+            alpha=0.2
+        )
+
+    ymax = max(np.max(mean_model_nb), np.max(mean_all_nb), 0.0) + 0.05
+    plt.ylim([-0.05, ymax])
+    plt.xlim([threshold_min, threshold_max])
+
+    plt.xticks(fontsize=20)
+    plt.yticks(fontsize=20)
+
+    plt.xlabel('Threshold Probability', fontsize=24, weight='bold')
+    plt.ylabel('Net Benefit', fontsize=24, weight='bold')
+    plt.legend(loc='lower left', fontsize=28)
+    plt.grid(True, linestyle='--', alpha=0.5)
+
+    plt.tight_layout()
+    os.makedirs(save_dir, exist_ok=True)
+    plt.savefig(os.path.join(save_dir, name), dpi=600, bbox_inches='tight')
+    plt.close()
+
+
+def quantify_acld_affected_vs_unaffected_attention(plot_data, save_dir=None, only_acld=True, top_frac=0.10):
+    def _normalize_attention(attn):
+        attn = np.asarray(attn, dtype=np.float64)
+        attn = np.maximum(attn, 0)
+        return attn / (np.sum(attn) + 1e-12)
+
+    def _attention_entropy(p):
+        p = _normalize_attention(p)
+        n = len(p)
+        entropy = -np.sum(p * np.log(p + 1e-12))
+        entropy = entropy / (np.log(n) + 1e-12)
+        return entropy
+
+    def _attention_gini(p):
+        p = _normalize_attention(p)
+        x = np.sort(p)
+        n = len(x)
+        if np.sum(x) <= 0:
+            return 0.0
+        gini = (2.0 * np.sum((np.arange(1, n + 1)) * x) / (n * np.sum(x))) - (n + 1) / n
+        return gini
+
+    def _attention_stats(attn, top_frac=0.10):
+        p = _normalize_attention(attn)
+        n = len(p)
+
+        top_k = max(1, int(np.ceil(n * top_frac)))
+        top_mass = np.sum(np.sort(p)[-top_k:])
+
+        peak = np.max(p)
+        peak_idx = int(np.argmax(p))
+        peak_loc = peak_idx / max(1, n - 1)
+
+        entropy = _attention_entropy(p)
+        gini = _attention_gini(p)
+
+        one_third = n // 3
+        two_third = 2 * n // 3
+
+        early_mass = np.sum(p[:one_third])
+        middle_mass = np.sum(p[one_third:two_third])
+        late_mass = np.sum(p[two_third:])
+
+        return {
+            'entropy': entropy,
+            'gini': gini,
+            'peak': peak,
+            'peak_idx': peak_idx,
+            'peak_loc': peak_loc,
+            'top10_mass': top_mass,
+            'early_mass': early_mass,
+            'middle_mass': middle_mass,
+            'late_mass': late_mass
+        }
+
+    records = []
+    attn_weight = plot_data['attn_weight']
+
+    for item in attn_weight:
+        if only_acld and item.get('label_name') != 'ACLD':
+            continue
+
+        acld_side = item.get('acld_side')
+        orig_id = item.get('orig_id')
+
+        if acld_side not in ['L', 'R', 'left', 'right']:
+            continue
+
+        attn_left = _normalize_attention(item['attn_left_1d'])
+        attn_right = _normalize_attention(item['attn_right_1d'])
+
+        if acld_side in ['L', 'left']:
+            affected_attn = attn_left
+            unaffected_attn = attn_right
+        else:
+            affected_attn = attn_right
+            unaffected_attn = attn_left
+
+        affected_stats = _attention_stats(affected_attn, top_frac=top_frac)
+        unaffected_stats = _attention_stats(unaffected_attn, top_frac=top_frac)
+
+        eps = 1e-8
+
+        record = {
+            'orig_id': orig_id,
+            'label_name': item.get('label_name'),
+            'acld_side': acld_side,
+        }
+
+        for key in affected_stats.keys():
+            record[f'affected_{key}'] = affected_stats[key]
+            record[f'unaffected_{key}'] = unaffected_stats[key]
+
+        for key in ['peak', 'top10_mass', 'gini', 'early_mass', 'middle_mass', 'late_mass']:
+            aff = affected_stats[key]
+            unaff = unaffected_stats[key]
+            record[f'{key}_diff'] = aff - unaff
+            record[f'{key}_ratio'] = aff / (unaff + eps)
+            record[f'{key}_affected_share'] = aff / (aff + unaff + eps)
+            record[f'{key}_dominance_index'] = (aff - unaff) / (aff + unaff + eps)
+
+        aff_entropy = affected_stats['entropy']
+        unaff_entropy = unaffected_stats['entropy']
+        record['entropy_diff'] = aff_entropy - unaff_entropy
+        record['entropy_ratio'] = aff_entropy / (unaff_entropy + eps)
+        record['entropy_focus_dominance_index'] = (
+            unaff_entropy - aff_entropy
+        ) / (unaff_entropy + aff_entropy + eps)
+
+        records.append(record)
+
+    df = pd.DataFrame(records)
+
+    if save_dir is not None:
+        os.makedirs(os.path.dirname(save_dir), exist_ok=True)
+        csv_path = os.path.join(save_dir, 'ACLD_affected_vs_unaffected_attention_stats.csv')
+        df.to_csv(csv_path, index=False)
+
+    return df

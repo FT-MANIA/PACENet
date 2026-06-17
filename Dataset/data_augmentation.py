@@ -16,7 +16,6 @@ class Augmentation:
         self.time_warp_knots = self.config.get('time_warp_knots', 4)
         self.magnitude_warp_std = self.config.get('magnitude_warp_std', 0.1)
         self.bias_range = self.config.get('bias_range', [-10, 10])
-        self.smooth_sigma = self.config.get('smooth_sigma', 1.0)
 
         self.use_jitter = self.config.get('use_jitter', True)
         self.use_scaling = self.config.get('use_scaling', True)
@@ -56,16 +55,13 @@ class Augmentation:
         C, T = x.shape
         x_new = np.zeros_like(x)
 
-        # Generate a random time step
         knots = np.random.normal(0, 1.0, size=self.time_warp_knots)
-        # Limit the time offset to prevent the complete destruction of the periodic structure
         knots = np.clip(knots, -2.0, 2.0)
 
         x_vals = np.linspace(0, T - 1, self.time_warp_knots)
         f = interp1d(x_vals, knots, kind='cubic', fill_value="extrapolate")
         offsets = f(np.arange(T))
 
-        # Normalize and map back to the index
         new_indices = np.arange(T) + offsets
         new_indices = np.clip(new_indices, 0, T - 1)
 
@@ -77,13 +73,10 @@ class Augmentation:
     def random_bias(self, x):
         x_new = x.copy()
 
-        # 角度通道：0,1,2,6,7,8
         angle_pairs = [(0, 6), (1, 7), (2, 8)]
 
-        # 平移通道：3,4,5,9,10,11
         trans_pairs = [(3, 9), (4, 10), (5, 11)]
 
-        # 保留“同一采集系统偏置”，但不要彻底打乱左右差异
         for l, r in angle_pairs:
             shared = np.random.uniform(-2.0, 2.0)
             diff = np.random.uniform(-0.5, 0.5)
@@ -112,7 +105,6 @@ class Augmentation:
             [6, 7, 8]
         ]
 
-        # Rotation range: The sensor error is usually within +/- 10 degrees.
         low, high = self.rotation_range
         for idxs in groups:
             if max(idxs) >= C:
@@ -121,153 +113,18 @@ class Augmentation:
             angles = np.radians(np.random.uniform(low, high, size=3))
             rx, ry, rz = angles
 
-            # Construct the rotation matrix
-            # Rotation around X
             Rx = np.array([[1, 0, 0], [0, np.cos(rx), -np.sin(rx)], [0, np.sin(rx), np.cos(rx)]])
-            # Rotation around Y
             Ry = np.array([[np.cos(ry), 0, np.sin(ry)], [0, 1, 0], [-np.sin(ry), 0, np.cos(ry)]])
-            # Rotation around Z
             Rz = np.array([[np.cos(rz), -np.sin(rz), 0], [np.sin(rz), np.cos(rz), 0], [0, 0, 1]])
 
-            # The combined rotation matrix R = Rz * Ry * Rx
             R = Rz @ Ry @ Rx
-
-            # Extract the original data [3, T]
             original_vec = x[idxs, :]
-
-            # Apply rotation: [3, 3] @ [3, T] -> [3, T]
             rotated_vec = R @ original_vec
-
-            # Assign back to the new array
             x_new[idxs, :] = rotated_vec
 
         return x_new
 
-    def paired_amplitude_morph(self, x, mode="koa_low_rom"):
-        """
-        Bilateral relationship-preserving amplitude morphing.
-
-        This is designed to simulate center/domain shifts in KOA:
-        - lower bilateral ROM
-        - lower AP translation range
-        - lower adduction/abduction variation
-        - preserve left-right relative pattern as much as possible
-
-        x: [12, T]
-           left channels  = 0:6
-           right channels = 6:12
-        """
-        x_new = x.copy()
-
-        # Channel pairs: (left, right)
-        # 0 add/abd, 1 rotation, 2 flexion, 3 AP, 4/5 other translations
-        pairs = [(0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11)]
-
-        for dof_idx, (l_ch, r_ch) in enumerate(pairs):
-            if mode == "koa_low_rom":
-                # flexion: strong but plausible ROM compression
-                if dof_idx == 2:
-                    shared_factor = np.random.uniform(0.60, 0.90)
-                # adduction/abduction: moderate compression
-                elif dof_idx == 0:
-                    shared_factor = np.random.uniform(0.60, 0.90)
-                # AP translation: stronger compression
-                elif dof_idx == 3:
-                    shared_factor = np.random.uniform(0.50, 0.85)
-                # other rotation/translation channels: mild compression
-                else:
-                    shared_factor = np.random.uniform(0.75, 1.00)
-            else:
-                shared_factor = np.random.uniform(0.85, 1.05)
-
-            # small L/R difference, but not independent distortion
-            diff_factor = np.random.uniform(-0.04, 0.04)
-            l_factor = np.clip(shared_factor + diff_factor, 0.45, 1.10)
-            r_factor = np.clip(shared_factor - diff_factor, 0.45, 1.10)
-
-            for ch, factor in [(l_ch, l_factor), (r_ch, r_factor)]:
-                center = np.mean(x_new[ch, :])
-                x_new[ch, :] = center + factor * (x_new[ch, :] - center)
-
-        return x_new
-
-    def paired_center_bias(self, x):
-        """
-        Simulate center-specific zero-offset differences while preserving
-        left-right relationship.
-
-        Compared with independent random_bias, this is safer for bilateral gait.
-        """
-        x_new = x.copy()
-
-        pairs = [(0, 6), (1, 7), (2, 8), (3, 9), (4, 10), (5, 11)]
-
-        for dof_idx, (l_ch, r_ch) in enumerate(pairs):
-            # angle channels: add/abd, rotation, flexion
-            if dof_idx in [0, 1, 2]:
-                shared_bias = np.random.uniform(-3.0, 3.0)
-                diff_bias = np.random.uniform(-0.5, 0.5)
-            # translation channels
-            else:
-                shared_bias = np.random.uniform(-0.5, 0.5)
-                diff_bias = np.random.uniform(-0.1, 0.1)
-
-            x_new[l_ch, :] += shared_bias + diff_bias
-            x_new[r_ch, :] += shared_bias - diff_bias
-
-        return x_new
-
-    def temporal_smoothing(self, x):
-        """
-        Lightweight temporal smoothing to simulate center-specific filtering.
-        No scipy dependency needed.
-        """
-        x_new = x.copy()
-        kernel_size = int(self.config.get("smooth_kernel_size", 5))
-        kernel_size = max(3, kernel_size)
-        if kernel_size % 2 == 0:
-            kernel_size += 1
-
-        kernel = np.ones(kernel_size, dtype=np.float32) / kernel_size
-        pad = kernel_size // 2
-
-        for c in range(x.shape[0]):
-            padded = np.pad(x[c], (pad, pad), mode="edge")
-            x_new[c] = np.convolve(padded, kernel, mode="valid")
-
-        return x_new
-
-    def koa_domain_shift(self, x):
-        """
-        KOA-specific domain shift augmentation.
-
-        Purpose:
-        simulate external-center KOA cases with lower bilateral motion amplitude,
-        lower AP translation, preserved bilateral relationship, and mild center style shift.
-        """
-        sample = x.copy()
-
-        # 1. Simulate low-ROM / low-translation KOA distribution
-        sample = self.paired_amplitude_morph(sample, mode="koa_low_rom")
-
-        # 2. Mild center-specific baseline offset, preserving bilateral relation
-        if np.random.rand() < 0.7:
-            sample = self.paired_center_bias(sample)
-
-        # 3. Mild smoothing / acquisition filtering difference
-        if np.random.rand() < 0.5:
-            sample = self.temporal_smoothing(sample)
-
-        # 4. Very light jitter only
-        if np.random.rand() < 0.5:
-            old_std = self.jitter_std
-            self.jitter_std = min(old_std, 0.005)
-            sample = self.jitter(sample)
-            self.jitter_std = old_std
-
-        return sample
-
-    def augment_batch(self, X, y, demographics, trace_info, augment_ratio=1, class_label=None):
+    def augment_batch(self, X, y, demographics, trace_info, augment_ratio=1):
         """Enhance a batch of data"""
         X_aug = [X]
         y_aug = [y]
@@ -282,45 +139,29 @@ class Augmentation:
 
             for i in range(len(X)):
                 sample = X[i].copy()
+                rand_choice = np.random.rand()
 
-                # KOA-specific augmentation: label 2 = KOA
-                if class_label == 2 and self.config.get("use_koa_domain_aug", True):
-                    if np.random.rand() < self.config.get("koa_domain_aug_prob", 0.75):
-                        sample = self.koa_domain_shift(sample)
-                    else:
-                        # fallback to conservative general augmentation
-                        if self.use_scaling:
-                            sample = self.scaling(sample)
-                        if self.use_jitter:
-                            sample = self.jitter(sample)
+                if rand_choice < 0.25:
+                    if self.use_random_bias:
+                        sample = self.random_bias(sample)
+
+                elif rand_choice < 0.50:
+                    if self.use_scaling:
+                        sample = self.scaling(sample)
+                    if np.random.rand() < 0.2 and self.use_time_warp:
+                        sample = self.time_warp(sample)
+
+                elif rand_choice < 0.75:
+                    if self.use_jitter:
+                        sample = self.jitter(sample)
+                    if self.use_magnitude_warp:
+                        sample = self.magnitude_warp(sample)
 
                 else:
-                    # General conservative augmentation
-                    rand_choice = np.random.rand()
-
-                    if rand_choice < 0.25:
-                        if self.config.get("use_paired_center_bias", True):
-                            sample = self.paired_center_bias(sample)
-                        elif self.use_random_bias:
-                            sample = self.random_bias(sample)
-
-                    elif rand_choice < 0.50:
-                        if self.use_scaling:
-                            sample = self.scaling(sample)
-                        if np.random.rand() < 0.2 and self.use_time_warp:
-                            sample = self.time_warp(sample)
-
-                    elif rand_choice < 0.75:
-                        if self.use_jitter:
-                            sample = self.jitter(sample)
-                        if self.use_magnitude_warp:
-                            sample = self.magnitude_warp(sample)
-
-                    else:
-                        if self.use_crosstalk:
-                            sample = self.crosstalk(sample)
-                        if self.use_scaling:
-                            sample = self.scaling(sample)
+                    if self.use_crosstalk:
+                        sample = self.crosstalk(sample)
+                    if self.use_scaling:
+                        sample = self.scaling(sample)
 
                 X_new.append(sample)
 
@@ -366,8 +207,7 @@ def data_augmentor(X, y, demographics, trace_info, config, aug_ratios):
             y_label,
             demo_label,
             trace_info_label,
-            augment_ratio,
-            class_label=int(label)
+            augment_ratio
         )
         demo_augmented_list.append(demo_aug)
         trace_info_augmented_list.append(trace_info_aug)

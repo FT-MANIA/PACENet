@@ -344,7 +344,6 @@ class Encoder(nn.Module):
             x, attn = attn_layer(x, attn_mask=attn_mask, tau=tau, delta=delta)
             attns.append(attn)
 
-        # 拼接所有的 routers
         x = torch.cat([x[:, -1, :].unsqueeze(1) for x in x], dim=1)
         if self.norm is not None:
             x = self.norm(x)

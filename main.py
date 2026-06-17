@@ -10,17 +10,22 @@ from trainer import kfold_runner
 from plot_utils import (plot_kfold_confusion_matrix, plot_class_spectral_energy, plot_multi_model_roc_comparison,
                         plot_multi_model_metric_boxplots, plot_ablation_metric_boxplots, plot_paired_delta_metric,
                         subset_extractor, attn_weight_extractor, plot_raw_signal_attention, plot_spectral_weights,
-                        subset_analysis)
+                        subset_analysis, plot_kfold_dca_curve, plot_acld_affected_vs_unaffected_attention,
+                        plot_multi_model_pr_comparison, plot_both_dev_ext_roc_comparison, plot_both_dev_ext_pr_comparison,
+                        quantify_acld_affected_vs_unaffected_attention)
 
 logger = logging.getLogger('__main__')
 parser = argparse.ArgumentParser()
 
-parser.add_argument('--run_mode', type=str, default='replot', choices=['main', 'exp', 'replot'],
+parser.add_argument('--run_mode', type=str, default='main', choices=['main', 'exp', 'replot'],
                     help="running mode: 'main': only for PACENet, 'exp': for contrast or ablation exp, 'replot': for ploting pic paper need")
 parser.add_argument('--dataset_path', default='Dataset/KGKD', help='Data path for dataset')
 parser.add_argument('--output_dir', default='Results', help='Output directory')
 parser.add_argument('--gpu', type=str, default='0', help='GPU index')
 parser.add_argument('--seed', default=172, type=int, help='Random seed')
+
+parser.add_argument("--enable_clinical_screening", default=True, type=bool, help="Enable clinical screening analysis: Healthy vs ACLD/KOA.")
+parser.add_argument("--screen_abnormal_classes", default=[1, 2], type=int, nargs="+", help="Classes treated as abnormal. Default: 1=ACLD, 2=KOA.")
 
 parser.add_argument('--internal_test_size', default=0.2, type=float, help='Size of internal test set of development set')
 parser.add_argument('--Norm', type=bool, default=True, help='Enable Data Normalization')
@@ -61,7 +66,12 @@ def run_main_analysis(config, device, Data):
     logger.info("=" * 50)
 
     exp_name = "Main_Analysis"
+    report = []
     results = kfold_runner(exp_name, {'ks': [6, 40]}, Data, config)
+    report.append(results['summary'])
+    report = pd.DataFrame(report)
+    report_path = os.path.join(config['save_dir'], 'Report.csv')
+    report.to_csv(report_path, index=False)
 
     dev_test_reports = results['dev_test_reports']
     ext_test_reports = results['ext_test_reports']
@@ -91,6 +101,7 @@ def run_exps(config, Data):
     logger.info("=" * 50)
 
     experiments = []
+    config['enable_clinical_screening'] = False
 
     experiments.append(('Ablation: Full PACENet', {
         'model_type': 'PACENet'
@@ -206,9 +217,8 @@ def run_exps(config, Data):
     final_path = os.path.join(config['save_dir'], 'Exp_Report.csv')
     final_df.to_csv(final_path, index=False)
     logger.info(f"All Done! Report saved to: {final_path}")
-    seed = None
 
-    return final_df, final_path, seed
+    return final_df, final_path
 
 def render_all_plots(config, Data):
     plot_class_spectral_energy(
@@ -245,15 +255,35 @@ def render_all_plots(config, Data):
         class_names = ['Healthy', 'ACLD', 'KOA']
 
         plot_kfold_confusion_matrix([r['confusion_matrix'] for r in dev_test_reports], class_names, config['plot_data_dir'],
-                                    'kfold_overall_dev_test_CM.png')
+                                    'Confusion Matrix on the Internal Test Set', 'kfold_overall_dev_test_CM.png')
         plot_kfold_confusion_matrix([r['confusion_matrix'] for r in ext_test_reports], class_names, config['plot_data_dir'],
-                                    'kfold_overall_ext_test_CM.png')
+                                    'Confusion Matrix on the External Test Set', 'kfold_overall_ext_test_CM.png')
 
         subset_analysis(plot_data['dev_test_subset_reports'], config['plot_data_dir'], prefix='Dev_Test')
         subset_analysis(plot_data['ext_test_subset_reports'], config['plot_data_dir'], prefix='Ext_Test')
 
         plot_raw_signal_attention(plot_data, config['plot_data_dir'])
+        plot_acld_affected_vs_unaffected_attention(plot_data, config['plot_data_dir'])
+        quantify_acld_affected_vs_unaffected_attention(plot_data, config['plot_data_dir'])
         plot_spectral_weights(plot_data, config['plot_data_dir'])
+
+        dev_test_y_true_list = [r['y_true'] for r in dev_test_reports]
+        dev_test_y_prob_list = [r['y_prob'] for r in dev_test_reports]
+        ext_test_y_true_list = [r['y_true'] for r in ext_test_reports]
+        ext_test_y_prob_list = [r['y_prob'] for r in ext_test_reports]
+
+        plot_kfold_dca_curve(dev_test_y_true_list, dev_test_y_prob_list, 'ACLD/KOA Screening on Internal Test Set',
+                             config['plot_data_dir'], name='DCA_Dev_Test_ACLD_KOA_Screening.png', positive_classes=(1, 2))
+        plot_kfold_dca_curve(ext_test_y_true_list, ext_test_y_prob_list, 'ACLD/KOA Screening on External Test Set',
+                             config['plot_data_dir'], name='DCA_Ext_Test_ACLD_KOA_Screening.png', positive_classes=(1, 2))
+        plot_kfold_dca_curve(dev_test_y_true_list, dev_test_y_prob_list, 'ACLD Detection on Internal Test Set',
+                             config['plot_data_dir'], name='DCA_Dev_ACLD_Detection.png', positive_classes=(1,))
+        plot_kfold_dca_curve(ext_test_y_true_list, ext_test_y_prob_list, 'ACLD Detection on External Test Set',
+                             config['plot_data_dir'], name='DCA_Ext_ACLD_Detection.png', positive_classes=(1,))
+        plot_kfold_dca_curve(dev_test_y_true_list, dev_test_y_prob_list, 'KOA Detection on Internal Test Set',
+                             config['plot_data_dir'], name='DCA_Dev_KOA_Detection.png', positive_classes=(2,))
+        plot_kfold_dca_curve(ext_test_y_true_list, ext_test_y_prob_list, 'KOA Detection on External Test Set',
+                             config['plot_data_dir'], name='DCA_Ext_KOA_Detection.png', positive_classes=(2,))
 
     pkl_path = os.path.join(config['plot_data_dir'], 'benchmark_plot_data.pkl')
     if os.path.exists(pkl_path):
@@ -263,6 +293,17 @@ def render_all_plots(config, Data):
                                         name='multi_model_roc_comparison_dev_test.png')
         plot_multi_model_roc_comparison(plot_data, config['num_classes'], config['plot_data_dir'], model='ext_test',
                                         name='multi_model_roc_comparison_ext_test.png')
+
+        plot_both_dev_ext_roc_comparison(plot_data, config['num_classes'], config['plot_data_dir'],
+                                         name='PACENet_vs_Tradition_roc_comparison_dev_ext_test.png')
+
+        plot_multi_model_pr_comparison(plot_data, config['num_classes'], config['plot_data_dir'], model='dev_test',
+                                        name='multi_model_pr_comparison_dev_test.png')
+        plot_multi_model_pr_comparison(plot_data, config['num_classes'], config['plot_data_dir'], model='ext_test',
+                                        name='multi_model_pr_comparison_ext_test.png')
+
+        plot_both_dev_ext_pr_comparison(plot_data, config['num_classes'], config['plot_data_dir'],
+                                         name='PACENet_vs_Tradition_pr_comparison_dev_ext_test.png')
 
         plot_multi_model_metric_boxplots(plot_data, config['num_classes'], config['plot_data_dir'], model='dev_test',
                                          metric='f1')
@@ -327,6 +368,7 @@ if __name__ == '__main__':
     mode = config['run_mode']
 
     if mode == 'main':
+        config["screening_policies"] = [("sensitivity", 0.95), ("sensitivity", 0.98), ("sensitivity", 0.80), ("sensitivity", 0.85), ("specificity", 0.95)]
         Data = load_gait_data(config)
         run_main_analysis(config, device, Data)
 
